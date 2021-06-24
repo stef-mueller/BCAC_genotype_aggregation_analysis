@@ -1,0 +1,581 @@
+---
+title: "S03. follow up hits"
+author: "Stefanie Mueller"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::readthedown:
+    highlight: kate
+    lightbox: true
+    gallery: true
+    toc_depth: 3
+    use_bookdown: true
+    fig_caption: true
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r knitr_init, echo=FALSE, cache=FALSE}
+# load libraries
+library(knitr)
+library(rmdformats)
+
+# define functions
+myDT = function(data){
+  data %>% DT::datatable(rownames = FALSE,
+    filter = 'bottom',
+    extensions = 'Buttons',
+      options = list(
+        searching = TRUE,
+        fixedColumns = TRUE,
+        autoWidth = TRUE,
+        dom = 'Bfrtip',
+        buttons = c('copy', 'csv', 'excel'))
+    )
+}
+
+## Global options
+#options(max.print="75")
+opts_chunk$set(echo=TRUE,
+	             cache=TRUE,
+               prompt=TRUE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE,
+               fig.width = 10)
+opts_knit$set(width=75)
+```
+
+# PREFACE
+
+## PROJECT
+burden analysis extendend gene region (including regulatory) in sporadic breast cancer in diverse ancestries
+
+## OBJECTIVE
+follow up on meta analysis results
+
+## load libraries
+```{r}
+library(tidyverse)
+library(data.table)
+library(DT)
+library(ggsci)
+```
+
+## Version Info
+```{r}
+sessionInfo()
+```
+
+## Set Global Varibales
+```{r}
+DIR="/home/stef/WORK/UCL/UGI/projects/breast_cancer/publication"
+#DIR="/home/rstudio/WORK/UCL/UGI/BCAC_publication"
+OUTFOLDER=paste0(DIR,"/data/output/")
+INPUTFOLDER=paste0(DIR,"/data/input/")
+SCRIPT="S03"
+DATE=Sys.Date()
+```
+
+## Plot Theme
+```{r}
+my_ggplotTheme = theme_bw()+
+  theme(title = element_text(size=rel(1.3), face = "bold"),
+        axis.title.y = element_text(vjust=1.5),
+        axis.title.x = element_text(vjust=-1.5),
+        axis.text = element_text(size=rel(1.3)),
+        legend.text = element_text(size=rel(1.3)),
+        strip.text = element_text(size=rel(1.3)),
+        plot.margin = unit(c(1,1,1,2), "cm"),
+        panel.grid.major = element_line(colour="grey60"))
+```
+
+# Load inputs
+
+## Load meta analysis results
+```{r}
+file = list.files(path = OUTFOLDER,
+                  pattern = "S01.MONSTER_Meta_analysis.",
+                  full.names = T)
+
+newest_file = file[order(file.mtime(file), decreasing = T)][1]
+print(basename(newest_file))
+
+# load the newest data
+meta = read.csv(newest_file)
+```
+
+
+## Load combined PValues
+```{r}
+file = list.files(path = OUTFOLDER,
+                  pattern = "S01.combined_MONSTER_PValues.",
+                  full.names = T)
+
+newest_file = file[order(file.mtime(file), decreasing = T)][1]
+print(basename(newest_file))
+
+# load the newest data
+assoc = read.csv(newest_file)
+```
+### format assoc
+```{r}
+assoc.long = assoc %>% 
+  select(CurrentGene, 
+         Asian_PValue,
+         African_PValue,
+         Hispanic_PValueGC,
+         Eur01A_PValue,
+         Eur01B_PValue,
+         Eur01C_PValue,
+         Eur01D_PValue,
+         Eur02A_PValue,
+         Eur02B_PValueGC,
+         Eur03A_PValue,
+         Eur03B_PValue,
+         Eur04_PValue,
+         Eur05A_PValue,
+         Eur05B_PValue,
+         Eur05C_PValue) %>% 
+  pivot_longer(col=-CurrentGene,
+               names_to="cohort.tmp",
+               values_to = "P") %>% 
+  separate(col = cohort.tmp,
+           into=c("cohort","metric"),
+           sep="_") %>% 
+  group_by(cohort) %>% 
+  mutate(P_FDR = p.adjust(P, method = "BH"))
+```
+
+
+## Load gene overview
+```{r}
+gene_overview = read.delim(paste0(INPUTFOLDER,"genes_overview.txt"))
+```
+
+# QC
+## Correlations between SNP numbers included in MONSTER analysis for gene and PValues
+### get SNP numbers
+```{r}
+snp.num.long = assoc %>% 
+  select(CurrentGene, ends_with("Num_Variants")) %>% 
+  pivot_longer(col=-CurrentGene,
+               names_to="cohort.tmp",
+               values_to = "SNP.Num") %>% 
+  mutate(cohort = str_extract(string = cohort.tmp,
+                              pattern = "^[0-9A-Za-z]+")) %>% 
+  select(-cohort.tmp)
+
+# correction of typo
+snp.num.long[snp.num.long$cohort=="Afrian",]$cohort = "African"
+```
+
+### calculate correlation
+```{r}
+cor.data = assoc.long %>% 
+  left_join(snp.num.long) %>% 
+  # remove missing data points
+  filter(!is.na(P)) %>% 
+  group_by(cohort) %>% 
+  summarise(Corr = cor(x = -log10(P), y=SNP.Num)) %>% 
+  arrange(-Corr) 
+```
+
+```{r}
+myDT(cor.data)
+```
+
+
+### Plot
+```{r, fig.height=12}
+assoc.long %>% 
+  left_join(snp.num.long) %>% 
+  # remove missing data points
+  filter(!is.na(P)) %>% 
+  group_by(cohort) %>% 
+  ggplot(aes(x=-log10(P),y=SNP.Num, color=cohort))+
+  geom_smooth(method="lm", se = TRUE) +
+  facet_wrap(~cohort, scales = "free", ncol=3) +
+  my_ggplotTheme +
+  ggsave(paste0(OUTFOLDER, SCRIPT,".supp.correlation_numberSNPs_and_PValue.",DATE,".pdf"),
+         device = "pdf", dpi=300,
+         height=10)
+```
+
+
+
+## Meta-Analysis
+
+For overall Meta-Analysis remove genes with more than half of cohorts missing (Number_missingPvalues>8) or for European only Meta-Analysis more than half of European cohorts missing (Number_missingPvalues>6)
+```{r}
+meta.qc = meta %>% 
+  mutate(QC_flag.missing_all = ifelse(Number_missingPvalues>8, "YES","NO"),
+         QC_flag.missing_european = ifelse(Number_missingPvalues>6, "YES","NO"))
+```
+
+### How many and which genes removed?
+#### Meta-Analysis all (YES = 'more than half cohorts with missing result' | NO = 'all good')
+```{r}
+meta.qc %>% 
+  count(QC_flag.missing_all)
+```
+
+#### Meta-Analysis European (YES = 'more than half cohorts with missing result' | NO = 'all good')
+```{r}
+meta.qc %>% 
+  count(QC_flag.missing_european)
+```
+
+# Top Hits
+## Meta-Analysis all (FDR corrected Meta-Analysis PValue < 0.05)
+```{r}
+hits.meta.all = meta.qc %>% 
+  filter(QC_flag.missing_all=="NO") %>% 
+  filter(StoufferMetaP_FDR<0.05) %>% 
+  arrange(StoufferMetaP_FDR) %>% 
+  mutate(Hit = "meta.all.fdr.p")
+```
+
+```{r}
+hits.meta.all %>% 
+  select(-StoufferMetaEuropeanP,-StoufferMetaEuropeanP_FDR) %>% 
+  myDT()
+```
+
+
+## Meta-Analysis european (FDR corrected Meta-Analysis PValue < 0.05)
+```{r}
+hits.meta.euro = meta.qc %>% 
+  filter(QC_flag.missing_european=="NO") %>% 
+  filter(StoufferMetaEuropeanP_FDR<0.05) %>% 
+  arrange(StoufferMetaEuropeanP_FDR) %>% 
+  mutate(Hit = "meta.european.fdr.p")
+```
+
+```{r}
+hits.meta.euro %>% 
+  select(-StoufferMetaP, -StoufferMetaP_FDR) %>% 
+  myDT()
+```
+
+## Asian ancestry 
+### FDR corrected PValue < 0.05 -> NONE
+```{r}
+assoc.long %>% 
+  filter(cohort=="Asian") %>%
+  filter(P_FDR<0.05)
+```
+
+### uncorrected PValue < 1e-4
+```{r}
+hits.asian = assoc.long %>% 
+  filter(cohort=="Asian") %>%
+  filter(P<1e-4)
+```
+
+## African ancestry
+### FDR corrected PValue < 0.05 -> NONE
+```{r}
+assoc.long %>% 
+  filter(cohort=="African") %>%
+  filter(P_FDR<0.05)
+```
+
+### uncorrected PValue < 1e-4
+```{r}
+hits.african = assoc.long %>% 
+  filter(cohort=="African") %>%
+  filter(P<1e-4)
+```
+
+## Hispanic ancestry
+### FDR corrected PValue < 0.05 -> NONE
+```{r}
+assoc.long %>% 
+  filter(cohort=="Hispanic") %>%
+  filter(P_FDR<0.05)
+```
+
+### uncorrected PValue < 1e-4 , also NONE
+```{r}
+hits.hispanic = assoc.long %>% 
+  filter(cohort=="Hispanic") %>%
+  filter(P<1e-4)
+```
+
+## Combine hit results
+### Format inputs
+```{r}
+hits.meta.all.format = hits.meta.all %>% 
+  mutate(cohort="meta.all") %>% 
+  select(cohort,CurrentGene, 
+         Hit, "P" = StoufferMetaP_FDR)
+
+hits.meta.euro.format = hits.meta.euro %>%
+  mutate(cohort="meta.euro") %>% 
+  select(cohort, CurrentGene, 
+         Hit, "P" = StoufferMetaEuropeanP_FDR)
+
+hits.asian.format = hits.asian %>% 
+  mutate(Hit = "single.asian.uncorrP.1e-4") %>% 
+  select(CurrentGene, Hit,P)
+
+hits.african.format = hits.african %>% 
+  mutate(Hit = "single.african.uncorrP.1e-4") %>% 
+  select(CurrentGene, Hit,P)
+```
+### Combine
+```{r}
+hit.list = list(hits.meta.all.format,
+                hits.meta.euro.format,
+                hits.asian.format,
+                hits.african.format)
+Hits = data.table::rbindlist(hit.list)
+```
+
+## The Hit Genes
+```{r}
+Hits %>%count(CurrentGene) %>% arrange(-n) 
+```
+
+## Save
+```{r}
+Hits %>% 
+  write_csv(paste0(OUTFOLDER,SCRIPT,".all_hits.",DATE,".csv"))
+```
+
+# Overlap between cohorts
+## extend hit data with Pvalues from all cohort and respective ranks
+### format single assoc results
+```{r}
+hit_genes = unique(Hits$CurrentGene)
+
+assoc.hits = assoc.long %>% 
+  group_by(cohort) %>% 
+  mutate(P_rank = frank(P,na.last = "keep")) %>% 
+  filter(CurrentGene %in% hit_genes) %>% 
+  select(CurrentGene, cohort, metric, P, P_rank)
+  
+```
+
+### format meta analysis results
+```{r}
+meta.hits = meta.qc %>% 
+  filter(QC_flag.missing_all=="NO" & QC_flag.missing_european=="NO" ) %>% 
+  select(CurrentGene,StoufferMetaP_FDR,StoufferMetaEuropeanP_FDR) %>% 
+  pivot_longer(col=-CurrentGene,
+               names_to = "metric",
+               values_to = "P") %>% 
+  mutate(cohort = ifelse(metric=="StoufferMetaP_FDR", "meta.all", "meta.euro")) %>% 
+  group_by(cohort) %>% 
+  mutate(P_rank = frank(P,na.last = "keep")) %>% 
+  filter(CurrentGene %in% hit_genes) %>% 
+  select(CurrentGene, cohort, metric, P, P_rank)
+```
+
+### combine all
+```{r}
+hits.extended = assoc.hits %>% 
+  rbind(meta.hits) %>% 
+  left_join(Hits[,-"P"], by=c("CurrentGene","cohort")) %>% 
+  mutate(is_a_hit = ifelse(is.na(Hit),"NO","YES"))
+```
+
+### add number of significant analyses and median rank
+```{r}
+hits.gene.summary = hits.extended %>% 
+  group_by(CurrentGene) %>% 
+  summarise(MedianRank = median(P_rank, na.rm=T),
+            NumberHitAnalyses = sum(!is.na(Hit)))
+  
+```
+
+
+```{r}
+hits.gene.summary %>% 
+  arrange(MedianRank) %>% 
+  myDT
+```
+
+# Not all hits are independend!
+## add loci info (created based on locuszoom plots and overlap of regions)
+region data for loci based on genocodeV25 files in mummy folder. for multi-gene loci minimum+maximum used to define 
+region of all present genes.
+```{r}
+loci = data.frame(
+  CurrentGene = c("FAM72B", "SRGAP2C",       #2
+                  "COLQ", "ANKRD28",         #4
+                  "CBLB", "RP11-231C18.3",   #6
+                  "FAM175A", "MAP3K1",       #8
+                  "MIER3", "BTN2A1",         #10
+                  "ESR1", "RBM18",           #12
+                  "MRRF", "FGFR2",           #14
+                  "FAM53B", "LSP1",          #16
+                  "TNNT3", "TRIM49",         #18
+                  "FMNL3", "KCNN4",          #20
+                  "LYPD5", "ZNF404",         #22
+                  "SIGLECL1", "IGLON5"),     #24
+  Loci = c("Loci01", "Loci02",               #2
+           "Loci03","Loci03",                #4
+           "Loci04","Loci05",                #6
+           "Loci06","Loci07",                #8
+           "Loci07","Loci08",                #10
+           "Loci09","Loci10",                #12
+           "Loci10","Loci11",                #14
+           "Loci12","Loci13",                #16
+           "Loci13","Loci14",                #18
+           "Loci15","Loci16",                #20
+           "Loci16","Loci16",                #22
+           "Loci17","Loci17"),               #24
+  Regions_hg38 = c("chr1:121,167,646-121,185,539", #FAM52B
+                   "chr1:121,184,810-121,392,822", #SRGAP2C                     #2
+                   "chr3:15,450,133-15,859,771",   #COLQ + ANKRD28
+                   "chr3:15,450,133-15,859,771",   #COLQ + ANKRD28              #4
+                   "chr3:105,655,461-105,869,552",  #CBLB
+                   "chr4:53,377,839-54,295,272", #RP11-231C18.3                     #6
+                   "chr4:83,459,517-83,523,348",  #FAM175A
+                   "chr5:56,815,574-56,971,675",  #MAP3K1 +MIER3                    #8
+                   "chr5:56,815,574-56,971,675",  #MAP3K1 +MIER3 
+                   "chr6:26,457,904-26,476,621",  #BTN2A1                           #10
+                   "chr6:151,656,691-152,129,619",  #ESR1
+                   "chr9:122,237,624-122,331,343", #RBM18+MRRF                      #12
+                   "chr9:122,237,624-122,331,343", #RBM18+MRRF
+                   "chr10:121,478,334-121,598,458", #FGFR2                          #14
+                   "chr10:124,619,292-124,744,269", #FAM53B
+                   "chr11:1,852,970-1,938,706", #LSP1+TNNT3                         #16
+                   "chr11:1,852,970-1,938,706", #LSP1+TNNT3 
+                   "chr11:49,027,501-49,038,451", #TRIM49                           #18
+                   "chr12:49,636,499-49,708,165", #FMNL3
+                   "chr19:43,766,533-43,901,385",  #KCNN4+LYPD5+ZNF404              #20
+                   "chr19:43,766,533-43,901,385",  #KCNN4+LYPD5+ZNF404
+                   "chr19:43,766,533-43,901,385",  #KCNN4+LYPD5+ZNF404              #22
+                   "chr19:51,246,348-51,269,330",  #SIGLECL1+IGLON5
+                   "chr19:51,246,348-51,269,330"))  #SIGLECL1+IGLON5                 #24
+
+
+```
+
+# Add overlap with previous BCAC GWAS results
+
+## Did BCAC also report our findings?
+### Creating Locuszoom plots
+1. go to biomart b37 and retrieve positions for all hit genes
+* results in file: `data/output/S03.hg37_position_hit_genes.2021-01-28.txt`
+* manually added entry for RP11-231C18.3 from file `/scripts/B_mummy/mummy_genotype/gencode_genes_V25_GRCh37.tsv.gz`
+2. create bed file of coding areas
+`awk '{OFS="\t"; print $5, $3, $4, $6, $1}' S03.hg37_position_hit_genes..2021-01-28txt >S03.hg37_position_hit_genes..2021-01-28bed`
+3. add window range of 100kb to start and end of gene in new bed file
+
+## load in locuszoom data
+```{r}
+bcac_ref = read.csv(paste0(OUTFOLDER,"S03.locuszoom_regions.2021-01-28.csv"))
+```
+### reformat locus data 
+```{r}
+bcac_ref.format = bcac_ref %>% 
+  mutate(cohort = "BCAC_ref",
+         metric = "PValue",
+         P=10^(-BCAC_study_max_neg_log_P),
+         P_rank=NA_real_,
+         Hit = NA_character_ ,
+         is_a_hit = as.character(BCAC_study_hit)) %>% 
+  select("CurrentGene" = "GENE",
+         cohort,
+         metric, 
+         P,
+         P_rank,
+         Hit,is_a_hit)
+```
+
+
+# European hits vs BCAC known
+## make plot data
+```{r}
+eurohit_plot_data.tmp = hits.extended %>%
+  filter(cohort=="meta.euro") %>% 
+  filter(is_a_hit=="YES")
+
+eurohit_plot_data= eurohit_plot_data.tmp %>% 
+  bind_rows(bcac_ref.format[bcac_ref.format$CurrentGene %in%eurohit_plot_data.tmp$CurrentGene,]) %>% 
+  left_join(loci,"CurrentGene") %>% 
+  mutate(cohort_fct = recode(cohort, meta.euro="Euopean\nMeta-Analysis", BCAC_ref="BCAC\nreplication")) %>% 
+  mutate(Regions_hg38_fct = factor(Regions_hg38,
+                                   levels=c("chr1:121,167,646-121,185,539", 
+                                            "chr1:121,184,810-121,392,822",
+                                            "chr3:15,450,133-15,859,771",
+                                            "chr3:105,655,461-105,869,552",
+                                            "chr4:53,377,839-54,295,272", 
+                                            "chr4:83,459,517-83,523,348",
+                                            "chr5:56,815,574-56,971,675",
+                                            "chr6:26,457,904-26,476,621",  
+                                            "chr6:151,656,691-152,129,619", 
+                                            "chr9:122,237,624-122,331,343", 
+                                            "chr10:121,478,334-121,598,458",
+                                            "chr10:124,619,292-124,744,269", 
+                                            "chr11:1,852,970-1,938,706", 
+                                            "chr11:49,027,501-49,038,451",
+                                            "chr12:49,636,499-49,708,165", 
+                                            "chr19:43,766,533-43,901,385",  
+                                            "chr19:51,246,348-51,269,330")))
+
+```
+
+## qualitive plot (hit vs no-hit)
+```{r, fig.height=20}
+eurohit_plot_data %>% 
+  ggplot(aes(y=reorder(CurrentGene, Loci), 
+             x=fct_relevel(cohort_fct, "Euopean\nMeta-Analysis"),
+             fill=fct_relevel(is_a_hit, "YES"))) +
+  geom_tile(color="black") +
+  my_ggplotTheme +
+  scale_fill_aaas() +
+  facet_wrap(~Regions_hg38_fct, scales = "free_y", ncol=1, shrink=F) +
+  labs(title="European gene hits",
+       subtitle = "Comparing with BCAC results",
+       x="Analysis",
+       y="Gene",
+       fill="Is gene significant?") + 
+  theme(panel.grid.major = element_blank())+
+  ggthemr::legend_bottom()+
+  ggsave(paste0(OUTFOLDER, SCRIPT,".EURO.hits_overlap.qual.LOCI.plus_BCAC_ref.",DATE,".pdf"),
+         dpi=300,
+         device = "pdf",
+         height=12,
+         width=6)
+```
+
+## quantiative plot (color by pvalue)
+```{r, fig.height=20}
+eurohit_plot_data %>% 
+  ggplot(aes(y=reorder(CurrentGene, Loci), 
+             x=fct_relevel(cohort_fct, "Euopean\nMeta-Analysis"),
+             fill=-log10(P))) +
+  geom_tile(color="black") +
+  my_ggplotTheme +
+  scale_fill_distiller(palette = "Spectral", direction = 1)+
+  facet_wrap(~Regions_hg38_fct, scales = "free_y", ncol=1, shrink=F) +
+  labs(title="European gene hits",
+       subtitle = "Comparing with BCAC results",
+       x="Analysis",
+       y="Gene",
+       fill="-log10(P)")# + 
+  ggsave(paste0(OUTFOLDER, SCRIPT,".EURO.hits_overlap.quanti.LOCI.plus_BCAC_ref.",DATE,".pdf"),
+         dpi=300,
+         device = "pdf",
+         height=20,
+         width=8)
+```
+
+## table
+```{r}
+table1 = eurohit_plot_data %>% 
+  select(Regions_hg38, CurrentGene,cohort,P,) %>% 
+  pivot_wider(id_cols=Regions_hg38:CurrentGene, names_from = cohort, values_from = P) %>% 
+  left_join(eurohit_plot_data[eurohit_plot_data$cohort=="meta.euro",c("CurrentGene", "P_rank")],
+            by="CurrentGene") %>% 
+  arrange(P_rank)
+
+write_csv(table1, paste0(OUTFOLDER,SCRIPT, ".table1_euro_meta_results.",DATE,".csv"))
+```
+

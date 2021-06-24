@@ -1,0 +1,142 @@
+---
+title: "cohort_descriptive"
+author: "Stefanie Mueller"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::readthedown:
+    highlight: kate
+    lightbox: true
+    gallery: true
+    toc_depth: 3
+    use_bookdown: true
+    fig_caption: true
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r knitr_init, echo=FALSE, cache=FALSE}
+# load libraries
+library(knitr)
+library(rmdformats)
+
+# define functions
+  myDT = function(data){
+  data %>% DT::datatable(rownames = FALSE,
+    filter = 'bottom',
+    extensions = 'Buttons',
+      options = list(
+        searching = TRUE,
+        fixedColumns = TRUE,
+        autoWidth = TRUE,
+        dom = 'Bfrtip',
+        buttons = c('copy', 'csv', 'excel'))
+    )
+}
+
+## Global options
+#options(max.print="75")
+opts_chunk$set(echo=TRUE,
+	             cache=TRUE,
+               prompt=TRUE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE,
+               fig.width = 10)
+opts_knit$set(width=75)
+```
+
+# PREFACE
+
+## PROJECT
+burden analysis extendend gene region (including regulatory) in sporadic breast cancer in diverse ancestries
+
+## OBJECTIVE
+create cohort descriptive and some QC
+
+## Of note
+detailed phenotypes not shared in public github repository
+
+## load libraries
+```{r}
+library(tidyverse)
+library(data.table)
+```
+
+## Version Info
+```{r}
+sessionInfo()
+```
+
+## Set Global Varibales
+```{r}
+DIR="/home/stef/WORK/UCL/UGI/BCAC_publication"
+OUTFOLDER=paste0(DIR, "data/output/")
+INPUTFOLDER=paste0(DIR, "data/input/")
+SCRIPT="S02"
+DATE=Sys.Date()
+```
+
+## Plot Theme
+```{r}
+my_ggplotTheme = theme_bw()+
+  theme(title = element_text(size=rel(1.3), face = "bold"),
+        axis.title.y = element_text(vjust=1.5),
+        axis.title.x = element_text(vjust=-1.5),
+        axis.text = element_text(size=rel(1.3)),
+        axis.text.x = element_text(hjust = 1),
+        legend.text = element_text(size=rel(1.3)),
+        strip.text = element_text(size=rel(1.3)),
+        plot.margin = unit(c(1,1,1,2), "cm"),
+        panel.grid.major = element_line(colour="grey60"))
+```
+
+# Load inputs
+
+## Load phenos
+```{r}
+pheno_files = list.files(path = paste0(INPUTFOLDER,"pheno"),
+                  pattern = "detailed_phenos.txt$",
+                  full.names = T)
+
+cohort = basename(pheno_files) %>% 
+  str_split(pattern = "\\.") %>% 
+  lapply("[",1) %>%  unlist()
+
+pheno.list = list()
+
+for (i in 1:length(pheno_files)){  
+ 
+  pheno.list[[i]] = fread(pheno_files[i]) %>% 
+    select(-starts_with("PC_"), -starts_with("study.")) %>% 
+    mutate(COHORT=cohort[i]) 
+}
+
+pheno.DF = data.table::rbindlist(pheno.list)
+```
+
+## save long pheno data
+```{r}
+pheno.DF %>%   write_csv(paste0(OUTFOLDER, SCRIPT,".supp.all_phenos.",DATE,".csv"))
+```
+
+# Make Table1 
+## Overall
+```{r}
+pheno.DF %>% 
+  group_by(Pheno) %>%
+  summarise(Count = n(),
+            Age.median= median(Age, na.rm=T),
+            Age.iqr = quantile(Age, probs = 0.75, na.rm=T) -quantile(Age, probs = 0.25, na.rm=T),
+            African.prop = mean(EthnicityGeno=="African"),
+            African.num = sum(EthnicityGeno=="African"),
+            Asian.prop = mean(EthnicityGeno=="Asian"),
+            Asian.num = sum(EthnicityGeno=="Asian"),
+            European.prop = mean(EthnicityGeno=="European"),
+            European.num = sum(EthnicityGeno=="European"),
+            Hispanic.prop = mean(EthnicityGeno=="other"),
+            Hispanic.num = sum(EthnicityGeno=="other")) %>% 
+  write_csv(paste0(OUTFOLDER, SCRIPT,".supp.table1.",DATE,".csv"))
+```
+

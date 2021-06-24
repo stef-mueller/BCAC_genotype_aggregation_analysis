@@ -1,0 +1,804 @@
+---
+title: "meta_analysis"
+author: "Stefanie Mueller"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::readthedown:
+    highlight: kate
+    lightbox: true
+    gallery: true
+    toc_depth: 3
+    use_bookdown: true
+    fig_caption: true
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r knitr_init, echo=FALSE, cache=FALSE}
+# load libraries
+library(knitr)
+library(rmdformats)
+
+# define functions
+  myDT = function(data){
+  data %>% DT::datatable(rownames = FALSE,
+    filter = 'bottom',
+    extensions = 'Buttons',
+      options = list(
+        searching = TRUE,
+        fixedColumns = TRUE,
+        autoWidth = TRUE,
+        dom = 'Bfrtip',
+        buttons = c('copy', 'csv', 'excel'))
+    )
+}
+
+## Global options
+#options(max.print="75")
+opts_chunk$set(echo=TRUE,
+	             cache=TRUE,
+               prompt=TRUE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE,
+               fig.width = 10)
+opts_knit$set(width=75)
+```
+
+# PREFACE
+
+## PROJECT
+burden analysis extendend gene region (including regulatory) in sporadic breast cancer in diverse ancestries
+
+## OBJECTIVE
+combine raw results of ancestries and substudies in meta analysis
+
+## load libraries
+```{r}
+library(tidyverse)
+library(data.table)
+library(metap)
+require(patchwork)
+```
+
+## Version Info
+```{r}
+sessionInfo()
+```
+
+## Set Global Varibales
+```{r}
+# test whether on docker of local Ubuntu laptop
+if (!grepl("Ubuntu",system("uname -v", intern=T))){
+  DIR="/home/rstudio/WORK/UCL/UGI/BCAC_publication"
+} else {
+  DIR="/home/stef/WORK/UCL/UGI/projects/breast_cancer/publication"
+}
+
+OUTFOLDER=paste0(DIR,"/data/output/")
+INPUTFOLDER=paste0(DIR,"/data/input/")
+
+SCRIPT="S01"
+DATE=Sys.Date()
+```
+
+## Plot Theme
+```{r}
+my_ggplotTheme = theme_bw()+
+  theme(title = element_text(size=rel(1.3), face = "bold"),
+        axis.title.y = element_text(vjust=1.5),
+        axis.title.x = element_text(vjust=-1.5),
+        axis.text = element_text(size=rel(1.3)),
+        axis.text.x = element_text(hjust = 1),
+        legend.text = element_text(size=rel(1.3)),
+        strip.text = element_text(size=rel(1.3)),
+        plot.margin = unit(c(1,1,1,2), "cm"),
+        panel.grid.major = element_line(colour="grey60"))
+```
+
+## define some functions
+### Genomic Control Correction
+```{r}
+GC_correction = function(Pvalue){
+  # derive chi-square statistics from PValues assuming 1 degree of freedom
+  chisq_distribution <- qchisq(Pvalue,1, lower.tail = F)
+  # calculate lambda from derived chi-square
+  lambda = median(chisq_distribution,na.rm=T)/qchisq(0.5,1)
+  # use genomic control to calculate corrected PValues
+  out = pchisq(q=(chisq_distribution/lambda),df=1,lower.tail=F)
+  return(out)
+}
+
+```
+### make QQ plots with ggplot
+```{r}
+gg_qqplot <- function(pvalues, ci = 0.95) {
+  
+  #
+  # function to create qq plot in ggplot of -log10 P values
+  # source: https://slowkow.com/notes/ggplot2-qqplot/
+  #
+  
+  ps = pvalues[!is.na(pvalues)]
+  n  <- length(ps)
+  df <- data.frame(
+    observed = -log10(sort(ps)),
+    expected = -log10(ppoints(n)),
+    clower   = -log10(qbeta(p = (1 - ci) / 2, shape1 = 1:n, shape2 = n:1)),
+    cupper   = -log10(qbeta(p = (1 + ci) / 2, shape1 = 1:n, shape2 = n:1))
+  )
+  log10Pe <- expression(paste("Expected -log"[10], plain(P)))
+  log10Po <- expression(paste("Observed -log"[10], plain(P)))
+  ggplot(df) +
+    geom_ribbon(
+      mapping = aes(x = expected, ymin = clower, ymax = cupper),
+      alpha = 0.1
+    ) +
+    geom_point(aes(expected, observed)) +
+    geom_abline(intercept = 0, slope = 1, alpha = 0.5) +
+    # geom_line(aes(expected, cupper), linetype = 2, size = 0.5) +
+    # geom_line(aes(expected, clower), linetype = 2, size = 0.5) +
+    xlab(log10Pe) +
+    ylab(log10Po)
+}
+```
+
+### METAL meta analysis method, sample size based and not inverse-variance based
+```{r}
+METAL_Sample_size_based_meta_PValue =  function(pvalues, weights){
+  
+  # Objective: use METAL implemented method to derive meta analysis P value
+  # Reference: table1 in "METAL: fast and efficient meta-analysis of genomewide association scans", doi:10.1093/bioinformatics/btq340
+  
+  # --- INPUTS
+  # pvalues = vector with pvalues
+  # weights =  vector with square root of samples sizes, needs to be in same order as pvalues
+  
+  # --- 1. calculate z statistic from pvalues, two tailed test
+  Z_i = qnorm(pvalues/2, lower.tail = FALSE)
+  
+  # --- 2. calculate meta analysis z score, equation from METAL paper
+  meta_Z = sum(Z_i * weights, na.rm = T)/sqrt(sum(weights^2,na.rm = T))
+  
+  # --- 3. derive meta analysis P values, two tailed test
+  meta_P = pnorm(meta_Z, lower.tail = F)*2
+  
+  # --- OUTPUT
+  return(meta_P)
+}
+```
+
+
+
+# Load inputs
+## Load Gene Overview data
+```{r}
+gene_overview = read.delim(paste0(INPUTFOLDER,"genes_overview.txt"))
+```
+
+## Load data for ancestries
+### Asian ancestry
+```{r}
+asian = fread(paste0(INPUTFOLDER,"ASIAN_MUMMY_SUMMARY.txt")) %>% 
+  dplyr::select(CurrentGene,SNPinROI, SNPfailingInfoThreshold,SNPfailingMAFThreshold,VariantNumber, PValue, P.fdr) %>% 
+  mutate(ancestry="asian",
+         cases = 8390,
+         controls = 6831) %>% 
+  filter(!is.na(PValue),
+         SNPfailingMAFThreshold + SNPfailingInfoThreshold <2*SNPinROI) %>% 
+  mutate(PValueGC = GC_correction(PValue))
+```
+
+### African ancestry
+```{r}
+african = fread(paste0(INPUTFOLDER,"AFRICAN_MUMMY_SUMMARY.txt")) %>% 
+  dplyr::select(CurrentGene,SNPinROI, SNPfailingInfoThreshold,SNPfailingMAFThreshold,VariantNumber, PValue, P.fdr) %>% 
+  mutate(ancestry="african",
+         cases = 3678,
+         controls = 2056) %>% 
+  filter(!is.na(PValue),
+         SNPfailingMAFThreshold + SNPfailingInfoThreshold <2*SNPinROI) %>%   mutate(PValueGC = GC_correction(PValue))
+```
+
+### Hispanic ancestry
+```{r}
+hispanic = fread(paste0(INPUTFOLDER,"HISPANIC_MUMMY_SUMMARY.txt")) %>% 
+  dplyr::select(CurrentGene,SNPinROI, SNPfailingInfoThreshold,SNPfailingMAFThreshold,VariantNumber, PValue, P.fdr) %>% 
+  mutate(ancestry="hispanic",
+         cases = 1335,
+         controls = 1216) %>% 
+  filter(!is.na(PValue),
+         SNPfailingMAFThreshold + SNPfailingInfoThreshold <2*SNPinROI) %>%   mutate(PValueGC = GC_correction(PValue))
+```
+
+### EUROPEAN eur01a
+```{r}
+eur01A = fread(paste0(INPUTFOLDER,"EUROPEAN_eur01A_MUMMY_SUMMARY.txt")) %>% 
+  dplyr::select(CurrentGene,SNPinROI, SNPfailingInfoThreshold,SNPfailingMAFThreshold,VariantNumber, PValue, P.fdr) %>% 
+  mutate(ancestry="european01A",
+         cases = 6350,
+         controls = 4802) %>% 
+  filter(!is.na(PValue),
+         SNPfailingMAFThreshold + SNPfailingInfoThreshold <2*SNPinROI) %>%   mutate(PValueGC = GC_correction(PValue))
+```
+
+### EUROPEAN eur01b
+```{r}
+eur01B = fread(paste0(INPUTFOLDER,"EUROPEAN_eur01B_MUMMY_SUMMARY.txt")) %>% 
+  dplyr::select(CurrentGene,SNPinROI, SNPfailingInfoThreshold,SNPfailingMAFThreshold,VariantNumber, PValue, P.fdr) %>% 
+  mutate(ancestry="european01B",
+         cases = 5187,
+         controls = 4238)%>% 
+  filter(!is.na(PValue),
+         SNPfailingMAFThreshold + SNPfailingInfoThreshold <2*SNPinROI) %>%   mutate(PValueGC = GC_correction(PValue))
+```
+
+### EUROPEAN eur01c
+```{r}
+eur01C = fread(paste0(INPUTFOLDER,"EUROPEAN_eur01C_MUMMY_SUMMARY.txt")) %>% 
+  dplyr::select(CurrentGene,SNPinROI, SNPfailingInfoThreshold,SNPfailingMAFThreshold,VariantNumber, PValue, P.fdr) %>% 
+  mutate(ancestry="european01C",
+         cases = 5982,
+         controls = 5422) %>% 
+  filter(!is.na(PValue),
+         SNPfailingMAFThreshold + SNPfailingInfoThreshold <2*SNPinROI) %>%   mutate(PValueGC = GC_correction(PValue))
+```
+
+### EUROPEAN eur01d
+```{r}
+eur01D = fread(paste0(INPUTFOLDER,"EUROPEAN_eur01D_MUMMY_SUMMARY.txt")) %>% 
+  dplyr::select(CurrentGene,SNPinROI, SNPfailingInfoThreshold,SNPfailingMAFThreshold,VariantNumber, PValue, P.fdr) %>% 
+  mutate(ancestry="european01D",
+         cases = 5012,
+         controls = 4552)%>% 
+  filter(!is.na(PValue),
+         SNPfailingMAFThreshold + SNPfailingInfoThreshold <2*SNPinROI) %>%   mutate(PValueGC = GC_correction(PValue))
+```
+
+### EUROPEAN eur02a
+```{r}
+eur02A = fread(paste0(INPUTFOLDER,"EUROPEAN_eur02A_MUMMY_SUMMARY.txt")) %>% 
+  dplyr::select(CurrentGene,SNPinROI, SNPfailingInfoThreshold,SNPfailingMAFThreshold,VariantNumber, PValue, P.fdr) %>% 
+  mutate(ancestry="european02A",
+         cases = 7576,
+         controls = 2124) %>% 
+  filter(!is.na(PValue),
+         SNPfailingMAFThreshold + SNPfailingInfoThreshold <2*SNPinROI) %>%   mutate(PValueGC = GC_correction(PValue))
+
+```
+
+### EUROPEAN eur02b
+```{r}
+eur02B = fread(paste0(INPUTFOLDER,"EUROPEAN_eur02B_MUMMY_SUMMARY.txt")) %>% 
+  dplyr::select(CurrentGene,SNPinROI, SNPfailingInfoThreshold,SNPfailingMAFThreshold,VariantNumber, PValue, P.fdr) %>% 
+  mutate(ancestry="european02B",
+         cases = 7953,
+         controls = 2347)%>% 
+  filter(!is.na(PValue),
+         SNPfailingMAFThreshold + SNPfailingInfoThreshold <2*SNPinROI) %>%   mutate(PValueGC = GC_correction(PValue))
+```
+
+### EUROPEAN eur03a
+```{r}
+eur03A = fread(paste0(INPUTFOLDER,"EUROPEAN_eur03A_MUMMY_SUMMARY.txt")) %>% 
+  dplyr::select(CurrentGene,SNPinROI, SNPfailingInfoThreshold,SNPfailingMAFThreshold,VariantNumber, PValue, P.fdr) %>% 
+  mutate(ancestry="european03A",
+         cases = 5049,
+         controls = 3472) %>% 
+  filter(!is.na(PValue),
+         SNPfailingMAFThreshold + SNPfailingInfoThreshold <2*SNPinROI) %>%   mutate(PValueGC = GC_correction(PValue))
+```
+
+### EUROPEAN eur03b
+```{r}
+eur03B = fread(paste0(INPUTFOLDER,"EUROPEAN_eur03B_MUMMY_SUMMARY.txt")) %>% 
+  dplyr::select(CurrentGene,SNPinROI, SNPfailingInfoThreshold,SNPfailingMAFThreshold,VariantNumber, PValue, P.fdr) %>% 
+  mutate(ancestry="european03B",
+         cases = 4057,
+         controls = 3647)%>% 
+  filter(!is.na(PValue),
+         SNPfailingMAFThreshold + SNPfailingInfoThreshold <2*SNPinROI) %>%   mutate(PValueGC = GC_correction(PValue))
+```
+
+### EUROPEAN eur04
+```{r}
+eur04 = fread(paste0(INPUTFOLDER,"EUROPEAN_eur04_MUMMY_SUMMARY.txt")) %>% 
+  dplyr::select(CurrentGene,SNPinROI, SNPfailingInfoThreshold,SNPfailingMAFThreshold,VariantNumber, PValue, P.fdr) %>% 
+  mutate(ancestry="european04",
+         cases = 6192,
+         controls = 8323)%>% 
+  filter(!is.na(PValue),
+         SNPfailingMAFThreshold + SNPfailingInfoThreshold <2*SNPinROI) %>%   mutate(PValueGC = GC_correction(PValue))
+```
+
+### EUROPEAN eur05a
+```{r}
+eur05A = fread(paste0(INPUTFOLDER,"EUROPEAN_eur05A_MUMMY_SUMMARY.txt")) %>% 
+  dplyr::select(CurrentGene,SNPinROI, SNPfailingInfoThreshold,SNPfailingMAFThreshold,VariantNumber, PValue, P.fdr) %>% 
+  mutate(ancestry="european05A",
+         cases = 5698,
+         controls = 3869)%>% 
+  filter(!is.na(PValue),
+         SNPfailingMAFThreshold + SNPfailingInfoThreshold <2*SNPinROI) %>%   mutate(PValueGC = GC_correction(PValue))
+```
+
+### EUROPEAN eur05b
+```{r}
+eur05B = fread(paste0(INPUTFOLDER,"EUROPEAN_eur05B_MUMMY_SUMMARY.txt")) %>% 
+  dplyr::select(CurrentGene,SNPinROI, SNPfailingInfoThreshold,SNPfailingMAFThreshold,VariantNumber, PValue, P.fdr) %>% 
+  mutate(ancestry="european05B",
+         cases = 5298,
+         controls = 3532) %>% 
+  filter(!is.na(PValue),
+         SNPfailingMAFThreshold + SNPfailingInfoThreshold <2*SNPinROI) %>%   mutate(PValueGC = GC_correction(PValue))
+```
+
+### EUROPEAN eur05c
+```{r}
+eur05C = fread(paste0(INPUTFOLDER,"EUROPEAN_eur05C_MUMMY_SUMMARY.txt")) %>% 
+  dplyr::select(CurrentGene,SNPinROI, SNPfailingInfoThreshold,SNPfailingMAFThreshold,VariantNumber, PValue, P.fdr) %>% 
+  mutate(ancestry="european05C",
+         cases = 5626,
+         controls = 3366) %>% 
+  filter(!is.na(PValue),
+         SNPfailingMAFThreshold + SNPfailingInfoThreshold <2*SNPinROI) %>%   mutate(PValueGC = GC_correction(PValue))
+```
+
+
+# Quality Control
+## Combined data
+```{r}
+QC_stuff = asian[,c(1,2,3,4,5,8)] %>% 
+  rbind(african[,c(1,2,3,4,5,8)]) %>% 
+  rbind(hispanic[,c(1,2,3,4,5,8)]) %>% 
+  rbind(eur01A[,c(1,2,3,4,5,8)]) %>%
+  rbind(eur01B[,c(1,2,3,4,5,8)]) %>%
+  rbind(eur01C[,c(1,2,3,4,5,8)]) %>%
+  rbind(eur01D[,c(1,2,3,4,5,8)]) %>%
+  rbind(eur02A[,c(1,2,3,4,5,8)]) %>% 
+  rbind(eur02B[,c(1,2,3,4,5,8)]) %>% 
+  rbind(eur03A[,c(1,2,3,4,5,8)]) %>% 
+  rbind(eur03B[,c(1,2,3,4,5,8)]) %>% 
+  rbind(eur04[,c(1,2,3,4,5,8)]) %>% 
+  rbind(eur05A[,c(1,2,3,4,5,8)]) %>%
+  rbind(eur05B[,c(1,2,3,4,5,8)]) %>%
+  rbind(eur05C[,c(1,2,3,4,5,8)]) 
+```
+
+## Number of genes with results per cohort
+```{r}
+QC_stuff %>% 
+  count(ancestry) %>% 
+  mutate(OVERALL = nrow(gene_overview)) %>% 
+  ggplot(aes(y=reorder(ancestry,n), x=n)) +
+  geom_bar(stat="identity", fill="black", color="black") +
+  geom_bar(aes(x=OVERALL),stat="identity", fill=NA, color="black") +
+  labs(x="Number of genes", y="Cohort",
+       title="Number of Genes with results",
+       subtitle = paste0("Total number genes to be analysed ",nrow(gene_overview))) +
+  my_ggplotTheme +
+  theme(axis.text.x = element_text(hjust = 0.5)) +
+  ggsave(paste0(OUTFOLDER,SCRIPT,".supp.number_genes_per_cohort.",DATE,".pdf"),
+         device = "pdf",
+        height = 10)
+```
+
+### table
+```{r}
+QC_stuff %>% 
+  count(ancestry) %>% 
+  mutate(OVERALL = nrow(gene_overview)) %>% 
+  write_csv(paste0(OUTFOLDER,SCRIPT,".supp.number_genes_per_cohort.",DATE,".csv"))
+```
+
+
+
+## Number of analysed SNPs per Gene in each cohort
+
+Distribution in cohorts of african and hispanic ancestry lightly skewed to the right compared to other cohorts.
+
+```{r, fig.height=24}
+QC_stuff %>% 
+  ggplot(aes(x=VariantNumber, color=ancestry, fill=ancestry)) +
+  geom_histogram(bins = 50) +
+  facet_grid(ancestry~.)+
+  labs(title = paste0("Number of analysed SNPs per gene"),
+       x="Variants in MONSTER analysis per Gene",
+       y="Gene Count") +
+  xlim(0,1000)+
+  my_ggplotTheme
+```
+
+## Proportion of SNPs per gene removed due to missing INFO or MAF threshold?
+In Hispanic and African ancestry samples smaller proportion of SNPs per gene removed. Possibly due to higher rate of rare variants in these ancestries.
+
+```{r,fig.height=24}
+QC_stuff %>% 
+  mutate(PROP_removed_snps = (SNPfailingInfoThreshold+SNPfailingMAFThreshold)/SNPinROI) %>% 
+  ggplot(aes(x=PROP_removed_snps,color=ancestry, fill=ancestry)) +
+  geom_histogram() +
+  facet_grid(ancestry~.)+
+  labs(title = paste0("Proportion of removed SNPs per gene"),
+       x= "Proportion of removed SNPs per gene",
+       y="Gene Count") +
+  my_ggplotTheme +
+  xlim(-0.1,1)
+```
+
+## Proportion of SNPs per gene removed due to low imputation quality
+In european cohorts remarkavly more SNPs removed due to low INFO scores.
+
+```{r,fig.height=24}
+QC_stuff %>% 
+  ggplot(aes(x=SNPfailingInfoThreshold/SNPinROI,color=ancestry, fill=ancestry)) +
+  geom_histogram() +
+  facet_grid(ancestry~.)+
+  labs(title = paste0("Proportion of SNPs removed due to low imputation quality per gene"),
+       x= "Proportion of removed SNPs per gene",
+       y="Gene count") +
+  my_ggplotTheme 
+
+```
+
+## Proportion of SNPs per gene removed due to MAF >0.05
+```{r,fig.height=24}
+QC_stuff %>% 
+  ggplot(aes(x=SNPfailingMAFThreshold/SNPinROI,color=ancestry, fill=ancestry)) +
+  geom_histogram() +
+  facet_grid(ancestry~.)+
+  labs(title = paste0("Proportion of SNPs removed with MAF >0.05 quality per gene"),
+       x= "Proportion of removed SNPs per gene",
+       y="Gene Count") +
+  my_ggplotTheme 
+```
+
+## QQ Plots and Genomic Inflation
+
+### function to perform calculations and make qqPlot
+```{r}
+qq_lambda = function(PValueVector){
+  
+  data = PValueVector
+  
+  # calculate Lambda defined as meadin(chisqu)/
+  pvalue <- data$PValue 
+  chisq <- qchisq(pvalue,1, lower.tail = F)
+  lambda = median(chisq)/qchisq(0.5,1)
+  
+  # calculate lambda1000
+  lambda1000 = 1 + (lambda -1) * (1/data$cases[1] + 1/data$controls[1]) /(1/1000+1/1000)
+
+  # create QQ Plot
+  QQ = gg_qqplot(data$PValue) +
+  labs(title = paste0("QQ Plot Pvalues in ",data$ancestry[1], " ancestry samples"),
+       subtitle = paste0("number samples = ",data$cases[1]+data$controls[1],
+                         ", number genes = ",nrow(data[!is.na(data$PValue),]),
+                         "\nlambda = ",round(lambda, 3),
+                         ", lambda1000 = ",round(lambda1000, 3))) +
+  theme_bw()+
+  theme(title = element_text(size=rel(1.3), face = "bold"),
+        axis.title.y = element_text(vjust=1.5),
+        axis.title.x = element_text(vjust=-1.5),
+        axis.text = element_text(size=rel(1.3)),
+        axis.text.x = element_text(hjust = 1),
+        legend.text = element_text(size=rel(1.3)),
+        strip.text = element_text(size=rel(1.3)),
+        plot.margin = margin(0,0.5,0.5,0,"cm"),
+        panel.grid.major = element_line(colour="grey60"))
+  
+  out =list(QQ, lambda, lambda1000)
+  return(out)
+}
+```
+
+### run function over all cohorts and save qqplots
+```{r}
+all_subcohorts = 
+  c("asian","african","hispanic",
+    "eur01A","eur01B","eur01C","eur01D",
+    "eur02A","eur02B",
+    "eur03A","eur03B",
+    "eur04",
+    "eur05A","eur05B","eur05C")
+
+# collect lambda, lambda1000 esitmates
+lambda.summary.list =list()
+
+for (i in 1:length(all_subcohorts)){
+  
+  out = qq_lambda(get(all_subcohorts[i]))
+  
+  # PLOT
+  ggsave(plot=out[[1]],
+         filename=paste0(OUTFOLDER,SCRIPT,".supp.QQ.",all_subcohorts[i],".",DATE,".pdf"),
+         device="pdf",
+         dpi=300)
+  
+  lambda.summary.list[[i]] = data.frame(ancestry = all_subcohorts[i],
+            case = get(all_subcohorts[i])$case[1],
+            control = get(all_subcohorts[i])$control[1],
+            lambda = out[[2]],
+            lambda1000 = out[[3]])
+  
+}
+
+```
+
+### combine qq plots
+```{r}
+plots = list()
+for (i in 1:length(all_subcohorts)){
+  plots[[i]] = qq_lambda(get(all_subcohorts[i]))[[1]] +
+    labs(title = paste0(all_subcohorts[i]), subtitle = "")
+}
+
+out = plots[[1]] + plots[[2]] + plots[[3]] + plots[[4]] + plots[[5]] +
+  plots[[6]] + plots[[7]] + plots[[8]] + plots[[9]] + plots[[10]] +
+  plots[[11]] + plots[[12]] + plots[[13]] + plots[[14]] + plots[[15]] +
+  plot_layout(nrow = 5) &
+  theme(legend.position='bottom')
+
+#save as pdf
+pdf(paste0(OUTFOLDER, SCRIPT, ".supp.all_cohort_qq_plts.",DATE,".pdf"),
+    useDingbats=F,
+    width=10, height = 18)
+out2
+dev.off()
+```
+
+```{r, eval=F}
+# save as png
+png(paste0(OUTFOLDER, SCRIPT, ".supp.all_cohort_qq_plts.",DATE,".png"),
+    width=600, height = 1200, units = "px")
+out
+dev.off()
+```
+
+
+### save lamdba and lambda1000 metrics
+```{r}
+lambda.summary = data.table::rbindlist(lambda.summary.list)
+write_csv(lambda.summary, 
+          paste0(OUTFOLDER, SCRIPT, ".supp.lambda_metrices.",DATE,".csv"))
+```
+
+### Lambda
+```{r}
+lambda.summary %>% 
+  arrange(-lambda1000) %>% 
+  myDT()
+```
+
+# Combine association data
+```{r}
+assocs = asian %>% 
+  select(1, "Asian_Num_Variants"=5,"Asian_PValue"=6,"Asian_FDR"=7, "Asian_PValueGC" =11) %>% 
+  full_join(african) %>% 
+  select(1:5,
+         "Afrian_Num_Variants"=VariantNumber,
+         "African_PValue"=PValue,
+         "African_FDR"=P.fdr,
+         "African_PValueGC"=PValueGC) %>% 
+  full_join(hispanic) %>% 
+  select(1:9,
+         "Hispanic_Num_Variants"=VariantNumber,
+         "Hispanic_PValue"=PValue,
+         "Hispanic_FDR"=P.fdr,
+         "Hispanic_PValueGC"=PValueGC) %>%
+  full_join(eur01A) %>% 
+  select(1:13,
+         "Eur01A_Num_Variants"=VariantNumber,
+         "Eur01A_PValue"=PValue,
+         "Eur01A_FDR"=P.fdr,
+         "Eur01A_PValueGC"=PValueGC) %>% 
+  full_join(eur01B) %>% 
+  select(1:17,
+         "Eur01B_Num_Variants"=VariantNumber,
+         "Eur01B_PValue"=PValue,
+         "Eur01B_FDR"=P.fdr,
+         "Eur01B_PValueGC"=PValueGC) %>% 
+  full_join(eur01C) %>% 
+  select(1:21,
+         "Eur01C_Num_Variants"=VariantNumber,
+         "Eur01C_PValue"=PValue,
+         "Eur01C_FDR"=P.fdr,
+         "Eur01C_PValueGC"=PValueGC) %>% 
+  full_join(eur01D) %>% 
+  select(1:25,
+         "Eur01D_Num_Variants"=VariantNumber,
+         "Eur01D_PValue"=PValue,
+         "Eur01D_FDR"=P.fdr,
+         "Eur01D_PValueGC"=PValueGC) %>% 
+  full_join(eur02A) %>% 
+  select(1:29,
+         "Eur02A_Num_Variants"=VariantNumber,
+         "Eur02A_PValue"=PValue,
+         "Eur02A_FDR"=P.fdr,
+         "Eur02A_PValueGC"=PValueGC) %>% 
+  full_join(eur02B) %>% 
+  select(1:33,
+         "Eur02B_Num_Variants"=VariantNumber,
+         "Eur02B_PValue"=PValue,
+         "Eur02B_FDR"=P.fdr,
+         "Eur02B_PValueGC"=PValueGC) %>% 
+  full_join(eur03A) %>% 
+  select(1:37,
+         "Eur03A_Num_Variants"=VariantNumber,
+         "Eur03A_PValue"=PValue,
+         "Eur03A_FDR"=P.fdr,
+         "Eur03A_PValueGC"=PValueGC) %>% 
+  full_join(eur03B) %>% 
+  select(1:41,
+         "Eur03B_Num_Variants"=VariantNumber,
+         "Eur03B_PValue"=PValue,
+         "Eur03B_FDR"=P.fdr,
+         "Eur03B_PValueGC"=PValueGC) %>% 
+  full_join(eur04) %>% 
+  select(1:45,
+         "Eur04_Num_Variants"=VariantNumber,
+         "Eur04_PValue"=PValue,
+         "Eur04_FDR"=P.fdr,
+         "Eur04_PValueGC"=PValueGC) %>% 
+  full_join(eur05A) %>% 
+  select(1:49,
+         "Eur05A_Num_Variants"=VariantNumber,
+         "Eur05A_PValue"=PValue,
+         "Eur05A_FDR"=P.fdr,
+         "Eur05A_PValueGC"=PValueGC) %>% 
+  full_join(eur05B) %>% 
+  select(1:53,
+         "Eur05B_Num_Variants"=VariantNumber,
+         "Eur05B_PValue"=PValue,
+         "Eur05B_FDR"=P.fdr,
+         "Eur05B_PValueGC"=PValueGC) %>% 
+  full_join(eur05C) %>% 
+  select(1:57,
+         "Eur05C_Num_Variants"=VariantNumber,
+         "Eur05C_PValue"=PValue,
+         "Eur05C_FDR"=P.fdr,
+         "Eur05C_PValueGC"=PValueGC) 
+
+```
+
+## Save
+```{r}
+write_csv(assocs,paste0(OUTFOLDER, SCRIPT, ".combined_MONSTER_PValues.",DATE,".csv"))
+```
+
+# Perform Meta Analysis Data
+
+Meta ANalysis based on raw PValues in subcohorts except for subcohort Eur02B (lambda1000:`r lambda.summary$lambda1000[lambda.summary$ancestry=="eur02B"]`) and Hispanic (lambda1000:`r lambda.summary$lambda1000[lambda.summary$ancestry=="hispanic"]`) cohorts will use genomic control corrected PValues.
+
+## add further columns for Meta-Analysis P Values
+```{r}
+Meta = assocs 
+Meta$StoufferMetaP =NA_real_
+Meta$StoufferMetaEuropeanP =NA_real_
+Meta$Number_missingPvalues = NA_integer_
+Meta$MetalMetaP =NA_real_
+Meta$MetalMetaEuropeanP =NA_real_
+```
+
+## define weights for meta analysis
+```{r}
+sampleSizeAll=c(sqrt(15221), #asian
+             sqrt(5734),  #african
+             sqrt(2551),  #hispanic
+             sqrt(11152), #eur01A
+             sqrt(9425),  #eur01B
+             sqrt(11404), #eur01C
+             sqrt(9564),  #eur01D
+             sqrt(9700),  #eur02A
+             sqrt(10300), #eur02B
+             sqrt(8521),  #eur03A
+             sqrt(7704),  #eur03B
+             sqrt(14515), #eur04
+             sqrt(9567), #eur05A
+             sqrt(8830), #eur05B
+             sqrt(8992)) #eur05C
+
+sampleSizeEuro=c(sqrt(11152), #eur01A
+                sqrt(9425),  #eur01B
+                sqrt(11404), #eur01C
+                sqrt(9564),  #eur01D
+                sqrt(9700),  #eur02A
+                sqrt(10300), #eur02B
+                sqrt(8521),  #eur03A
+                sqrt(7704),  #eur03B
+                sqrt(14515), #eur04
+                sqrt(9567), #eur05A
+                sqrt(8830), #eur05B
+                sqrt(8992)) #eur05C
+```
+
+
+## perform meta-analysis
+```{r}
+for(i in 1:nrow(assocs)){
+  # temporary data for metaP value calculation for all cohorts
+  tmpAll = Meta %>% slice(i) %>% select(Asian_PValue, African_PValue, Hispanic_PValueGC,
+        Eur01A_PValue,Eur01B_PValue,Eur01C_PValue,Eur01D_PValue,
+        Eur02A_PValue,Eur02B_PValueGC,Eur03A_PValue,Eur03B_PValue,Eur04_PValue,
+        Eur05A_PValue,Eur05B_PValue,Eur05C_PValue) %>% unlist()
+
+  # temporary data for metaP value calculation for European cohorts
+  tmpEuro = Meta %>% slice(i) %>% select(Eur01A_PValue,Eur01B_PValue,Eur01C_PValue,Eur01D_PValue,
+                                       Eur02A_PValue,Eur02B_PValueGC,Eur03A_PValue,Eur03B_PValue,Eur04_PValue,
+                                       Eur05A_PValue,Eur05B_PValue,Eur05C_PValue) %>% unlist()
+
+  # meta analysis using Stouffer
+  Meta$StoufferMetaP[i] = sumz(p=tmpAll,weights = sampleSizeAll, na.action = na.omit)$p
+  Meta$StoufferMetaEuropeanP[i] = sumz(p=tmpEuro,weights = sampleSizeEuro, na.action = na.omit)$p
+  
+  # meta analysis using METAL method
+  Meta$MetalMetaP[i]  = METAL_Sample_size_based_meta_PValue(pvalues = tmpAll, weights = sampleSizeAll)
+  Meta$MetalMetaEuropeanP[i]  = METAL_Sample_size_based_meta_PValue(pvalues = tmpEuro, weights = sampleSizeEuro)
+  
+  Meta$Number_missingPvalues[i] = sum(is.na(tmpAll))
+}
+
+Meta$StoufferMetaP_FDR = p.adjust(Meta$StoufferMetaP, method ="BH")
+Meta$StoufferMetaEuropeanP_FDR = p.adjust(Meta$StoufferMetaEuropeanP, method ="BH")
+Meta$MetalMetaP_FDR = p.adjust(Meta$MetalMetaP, method ="BH")
+Meta$MetalMetaEuropeanP_FDR = p.adjust(Meta$MetalMetaEuropeanP, method ="BH")
+```
+
+## Save
+```{r}
+Meta %>% 
+  select(CurrentGene,StoufferMetaP, StoufferMetaP_FDR,
+        StoufferMetaEuropeanP,StoufferMetaEuropeanP_FDR,
+        starts_with("Metal"),
+        Number_missingPvalues) %>% 
+  write_csv(paste0(OUTFOLDER, SCRIPT, ".MONSTER_Meta_analysis.",DATE,".csv"))
+```
+
+## Load 
+```{r}
+Meta = read_csv(paste0(OUTFOLDER, "S01.MONSTER_Meta_analysis.2021-02-10.csv"))
+```
+
+
+# QQ Plot Meta Analysis
+## Stouffer
+```{r}
+StoufferALL = gg_qqplot(Meta$StoufferMetaP) +
+  my_ggplotTheme +
+  labs(title = "Meta Analysis of all cohorts")
+
+StoufferEURO = gg_qqplot(Meta$StoufferMetaEuropeanP) +
+  my_ggplotTheme +
+  labs(title = "Meta Analysis of european cohorts")
+
+out = StoufferALL + StoufferEURO +
+  plot_layout(nrow = 2) 
+ 
+pdf(paste0(OUTFOLDER, SCRIPT, ".supp.stouffer_meta_qq_plots.",DATE,".pdf"),
+    useDingbats=F,
+    width=6, height = 7)
+out
+dev.off()
+```
+
+## Metal method
+```{r}
+MetalALL = gg_qqplot(Meta$MetalMetaP) +
+  my_ggplotTheme +
+  labs(title = "METAL Meta Analysis of all cohorts")
+
+MetalEURO = gg_qqplot(Meta$MetalMetaEuropeanP) +
+  my_ggplotTheme +
+  labs(title = "METAL Meta Analysis of european cohorts")
+
+out = MetalALL + MetalEURO +
+  plot_layout(nrow = 2) 
+ 
+pdf(paste0(OUTFOLDER, SCRIPT, ".supp.metal_meta_qq_plots.",DATE,".pdf"),
+    useDingbats=F,
+    width=6, height = 7)
+out
+dev.off()
+```
+

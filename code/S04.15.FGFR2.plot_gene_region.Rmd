@@ -1,0 +1,480 @@
+---
+title: "S04.15.FGFR2.plot_gene_region"
+author: "Stefanie Mueller"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::readthedown:
+    highlight: kate
+    lightbox: true
+    gallery: true
+    toc_depth: 3
+    use_bookdown: true
+    fig_caption: true
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r knitr_init, echo=FALSE, cache=FALSE}
+# load libraries
+library(knitr)
+library(rmdformats)
+
+# define functions
+myDT = function(data){
+  data %>% DT::datatable(rownames = FALSE,
+    filter = 'bottom',
+    extensions = 'Buttons',
+      options = list(
+        searching = TRUE,
+        fixedColumns = TRUE,
+        autoWidth = TRUE,
+        dom = 'Bfrtip',
+        buttons = c('copy', 'csv', 'excel'))
+    )
+}
+
+## Global options
+#options(max.print="75")
+opts_chunk$set(echo=TRUE,
+	             cache=FALSE,
+               prompt=TRUE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE,
+               fig.width = 10)
+opts_knit$set(width=75)
+```
+
+
+# TODO:
+- [x] code biomart query to get gene model positions -> see exploratory/tmp.R script
+- [x] add more cohorts
+- [x] add color indicator for additional marker found only in diverse
+- [x] retrieve BCAC stats from locuszoom
+- [x] add MONSTER pvalue to BCAC chart as 2 horizontal lines (euro and all-cohrots)
+- [ ] create plots for all significant resutls and some suggestive results
+
+# PREFACE
+
+## PROJECT
+burden analysis extendend gene region (including regulatory) in sporadic breast cancer in diverse ancestries
+
+## OBJECTIVE
+plot gene regions
+
+## Genome Build
+Plot will be output in hg38
+Input are in:
+  - MONSTER.snplist: variants included in gene-specific aggregation test -> hg19
+  - gene models: retrieved gene tracks from biomart -> hg38
+  - BCAC GWAS results: -> hg19
+
+## load libraries
+```{r}
+library(tidyverse)
+library(data.table)
+library(DT)
+library(ggsci)
+library(liftOver)
+library(gggenes)
+library(cowplot)
+library(purrr)
+library(R.utils)
+library(biomaRt)
+```
+
+## Version Info
+```{r}
+sessionInfo()
+```
+
+## Set Global Varibales
+```{r}
+# test whether on docker of local Ubuntu laptop
+if (!grepl("Ubuntu",system("uname -v", intern=T))){
+  DIR="/home/rstudio/WORK/UCL/UGI/BCAC_publication"
+} else {
+  DIR="/home/stef/WORK/UCL/UGI/projects/breast_cancer/publication"
+}
+
+
+OUTFOLDER=paste0(DIR,"/data/output/")
+INPUTFOLDER=paste0(DIR,"/data/input/")
+TMPDIR=paste0(DIR,"/exploratory/tmp/")
+SCRIPT="S04"
+DATE=Sys.Date()
+```
+
+## load functions
+```{r}
+# function for LiftOver hg19 to hg38
+source(paste0(DIR,"/code/fun.lift_hg19_hg38.R"))
+```
+
+## define functions
+```{r}
+# function to read and format MONSTER snplist file data containing 
+# all markers and their weights which are included in MONSTER run for specific gene and cohort
+read_format_MONSTER_snplist = function(cohort,
+                                       gene,
+                                       gene_id,
+                                       chainfile=chain_hg19_hg38_path){
+    # create dir path to cohort mummy logs
+  tardir=paste0(INPUTFOLDER,"/mummy_log/tars/",cohort)
+  
+  # get name of archive
+  file = list.files(path = tardir,
+                    pattern = paste0("^",gene_id,"_"),
+                    full.names = T)
+  
+   # if file for cohort not available return empty data.frame
+  if (length(file)==0){
+    
+    out = data.frame(
+      "chr" =  NA_character_,
+      "pos_hg19" = NA_real_,
+      "pos_hg38" = NA_real_,
+      "variant_ID" = NA_character_,
+      "CHROM" = NA_real_,
+      "A1" = NA_character_,
+      "A2" = NA_character_,
+      "SNPweight" = NA_real_,
+      "cohort" = NA_character_,
+      "gene" = NA_character_
+    )
+    
+  } else {
+  
+    # in case of multiple hits take newest file
+    newest_file = file[order(file.mtime(file), decreasing = T)][1]
+    
+    # MONSTER SNPlist file name
+    snpfile = paste0(basename(newest_file),"/MONSTER.snplist.txt") %>% 
+      str_replace(pattern=".tar.gz", replacement = "")
+    
+    # untar single file from archive
+    untar(tarfile=newest_file,
+          files=snpfile,
+          exdir=TMPDIR)
+    
+    # read MONSTER snplist file in 
+    X <- read.delim(paste0(TMPDIR,snpfile), header=F, stringsAsFactors = F)
+    # clean first column values which contain SNPset meta data
+    X[1,1] <- str_replace(X[1,1], pattern = "SNPlist01 1   ", replacement = "")
+    X[2,1] <- str_replace(X[2,1], pattern = "SNPlist01 1   ", replacement = "")
+    
+    # format SNPlist data
+    X2 = data.frame(
+      variant_ID = X[1,] %>% unlist(),
+      SNPweight = X[2,] %>% unlist() %>% as.character() %>% as.numeric()) %>%
+      # separate the SNP identifier
+      separate(col = variant_ID,
+               into =c("CHROM", "POS.tmp", "A1", "A2"),
+               sep="_",
+               remove = F,
+               convert= TRUE) %>% 
+      # give position correct format
+      mutate(pos_hg19 = as.numeric(as.character(POS.tmp))) %>% 
+      # add annotation
+      mutate(cohort = cohort,
+             gene = gene) %>% 
+      dplyr::select(-POS.tmp)
+    
+    # make liftOver input format
+    X2.lift = X2 %>%  
+      mutate(chr = paste0("chr",CHROM)) %>% 
+      dplyr::select(chr, pos_hg19)
+    
+    # liftOver from hg19 to hg38
+    out = lift_hg19_hg38(data = X2.lift,
+      chain =chainfile) %>% 
+      # combine with hg19 data
+      left_join(X2, by = "pos_hg19")
+    }
+  
+  # return output
+  return(out)
+}
+
+
+# query biomart to get all coding genes in chromosomal region
+# !!ATTENTION: chromosomal region needs to be given as CHR:START:END and NOT CHR:START-END
+query_genes_in_region_biomart_hg38 = function(gene,
+                                              region,
+                                              mart=ensembl){
+  
+  # set attributes that should be output
+  attributes.chosen = c("ensembl_gene_id",
+                        "chromosome_name",
+                        "start_position",
+                        "end_position",
+                        "strand",
+                        "external_gene_name",
+                        "external_gene_source",
+                        "gene_biotype")
+
+  # preform data query
+  out = getBM(attributes=attributes.chosen, 
+              filters = "chromosomal_region", 
+              values = region, 
+              mart = ensembl)
+  
+  out.protein_coding = out %>% 
+    filter(gene_biotype=="protein_coding") %>% 
+    # make boolean variable whether gene on forward strand, necessary for geom_gene_arrows 
+    mutate(direction = strand==1) %>% 
+    mutate(gene_of_interest = external_gene_name==gene)
+  
+  return(out.protein_coding)
+}
+```
+
+
+## Plot Theme
+```{r}
+my_ggplotTheme = theme_bw()+
+  theme(title = element_text(size=rel(1.3), face = "bold"),
+        axis.title.y = element_text(vjust=1.5),
+        axis.title.x = element_text(vjust=-1.5),
+        axis.text = element_text(size=rel(1.3)),
+        legend.text = element_text(size=rel(1.3)),
+        strip.text = element_text(size=rel(1.3)),
+        plot.margin = unit(c(1,1,1,2), "cm"),
+        panel.grid.major = element_line(colour="grey60"))
+```
+
+## Plot Colors
+```{r}
+mycols = c("grey60","#045a8d")
+```
+
+## cohort info
+```{r}
+# make cohort lists to map function with purrr
+euro_cohorts = list("eur01A", "eur01B", "eur01C", "eur01D",
+                    "eur02A", "eur02B",
+                    "eur03A", "eur03B",
+                    "eur04",
+                    "eur05A", "eur05B")
+
+diverse_cohorts = list("african", "asian", "hispanic")
+```
+
+# Load inputs
+## Define Path to LiftOver Chain File
+```{r}
+# downloaded chain file from UCSC
+chain_hg19_hg38_path = paste0(INPUTFOLDER,"/hg19ToHg38.over.chain")
+```
+
+## Gene ID Map
+mapping gene symbols to gene IDs used in naming of files
+
+```{r}
+genes_diverse=c("RP11-231C18.3","SRGAP2C","MAP3K1","FAM175A","BTN2A1","MIER3","TNNT3","LSP1","FMNL3","FAM72B","FGFR1","ZNF404","LYPD5","KCNN4", "FGFR2","CBLB")
+
+id_diverse=c(2312,2578,3587,5340,6639,8691,10113,11289,11889,13017,13061,13984,16771,16809,2055,2294)
+
+genes_euro=c("FAM72B","SRGAP2C","RP11-231C18.3","FAM175A","MAP3K1","MIER3","BTN2A1","FGFR1","LSP1","TNNT3","FMNL3","KCNN4","LYPD5","ZNF404","FGFR2","CBLB")
+id_euro=c(1059,1061,14069,14226,14742,14744,15600,17592,2810,2811,4385,9802,9803,9805,
+          2665,13319)
+
+gene_id_map_diverse  = data.frame(genes_diverse, id_diverse)
+gene_id_map_euro  = data.frame(genes_euro, id_euro)
+gene_id_map = gene_id_map_diverse %>% 
+  inner_join(gene_id_map_euro, by =c("genes_diverse" = "genes_euro")) %>% 
+  dplyr::select("gene"=1, everything())
+```
+
+# Load BCAC assoc results
+```{r}
+bcac_gwas = fread(paste0(INPUTFOLDER,"summary_stats.gz")) %>% 
+  dplyr::select("Chrom" = 1,
+                pos_hg19 = 2,
+                neg_log_pvalue) %>% 
+  mutate(chr=paste0("chr", Chrom))
+```
+
+
+# Load burden MONSTER results
+```{r}
+monster = read.csv(paste0(OUTFOLDER, "S01.MONSTER_Meta_analysis.2021-02-10.csv")) %>% 
+  # only keep genes of interest
+  filter(CurrentGene %in% gene_id_map$gene)
+```
+
+
+# Create individual gene data: FGFR2
+## Load MONSTER SNPlist
+### Set Gene
+```{r}
+CURRENT_GENE = gene_id_map %>% filter(gene == "FGFR2")
+```
+
+### Load Vars per cohort
+Genome Build: MONSTER.snplist files are in hg19
+```{r}
+# load all euro cohorts
+euro_snp_data.list = map(euro_cohorts, ~read_format_MONSTER_snplist(
+  cohort = .x,
+  gene=CURRENT_GENE$gene,
+  gene_id = CURRENT_GENE$id_euro))
+
+euro_snp_data = data.table::rbindlist(euro_snp_data.list) %>% 
+  mutate(ancestry="european")
+
+# load all diverse cohorts
+diverse_snp_data.list = map(diverse_cohorts, ~read_format_MONSTER_snplist(
+  cohort = .x,
+  gene=CURRENT_GENE$gene,
+  gene_id = CURRENT_GENE$id_diverse))
+
+diverse_snp_data = data.table::rbindlist(diverse_snp_data.list) %>% 
+  mutate(ancestry="diverse")
+
+# clean up
+rm(euro_snp_data.list)
+rm(diverse_snp_data.list)
+```
+
+## Format cohort data
+```{r}
+all_cohorts = euro_snp_data %>% 
+  rbind(diverse_snp_data) %>% 
+  dplyr::select(-cohort) %>% 
+  # remove variants in multiple cohorts of same ancestry group (ie. european or diverse)
+  distinct() %>% 
+  # only keep diverse anextry variants if they have not also been included in european cohorts
+  group_by(variant_ID) %>% 
+  arrange(desc(ancestry), .by_group = T) %>% 
+  dplyr::slice(1)
+```
+
+## Retrieve Gene Model data from biomart
+
+### get genetic region limits for retrieving gene model/BCAC results 
+```{r}
+print("hg19")
+paste0(unique(all_cohorts$CHROM),":",min(all_cohorts$pos_hg19, na.rm = T),"-",max(all_cohorts$pos_hg19, na.rm = T))
+
+print("hg38")
+paste0(unique(all_cohorts$CHROM),":",min(all_cohorts$pos_hg38, na.rm = T),"-",max(all_cohorts$pos_hg38, na.rm = T))
+```
+
+### query biomart
+```{r}
+# define correct ensembl dataset to use
+if(!exists("ensembl")){ensembl = useMart("ensembl",dataset="hsapiens_gene_ensembl")}
+
+gene_model = query_genes_in_region_biomart_hg38(
+  gene = CURRENT_GENE$gene,
+  region = paste0(unique(all_cohorts$CHROM),":",min(all_cohorts$pos_hg38, na.rm = T),":",max(all_cohorts$pos_hg38, na.rm = T)),
+  mart = ensembl)
+```
+
+## generate BCAC data for gene region 
+### extract BCAC GWAS results for region
+```{r}
+bcac_current = bcac_gwas %>%
+  filter(Chrom == all_cohorts$CHROM[1] &
+         pos_hg19 >= min(all_cohorts$pos_hg19, na.rm = T) & 
+         pos_hg19 <= max(all_cohorts$pos_hg19, na.rm = T)) %>% 
+  dplyr::select(-Chrom) %>% 
+  distinct()
+  
+```
+
+### liftOver BCAC data from hg19 to hg38
+```{r}
+bcac_current.lift = lift_hg19_hg38(bcac_current,
+                                   chain_hg19_hg38_path)
+```
+
+## format monster meta analysis results
+```{r}
+monster_current = monster %>% 
+  filter(CurrentGene == CURRENT_GENE$gene) %>% 
+  mutate(neg_log_meta_all_raw = -log10(StoufferMetaP)) %>% 
+  mutate(neg_log_meta_euro_raw = -log10(StoufferMetaEuropeanP)) %>% 
+  dplyr::select(neg_log_meta_all_raw, neg_log_meta_euro_raw,
+                StoufferMetaP_FDR, StoufferMetaEuropeanP_FDR)
+```
+
+
+# Plot
+## general variables
+```{r}
+xlim=c(min(all_cohorts$pos_hg38, gene_model$start_position, na.rm = T),max(all_cohorts$pos_hg38, gene_model$end_position, na.rm = T))
+
+```
+
+
+## Facet1: Gene Track
+```{r}
+pf1 = ggplot(gene_model,aes(xmin = start_position, xmax = end_position,
+                             y = external_gene_name, 
+                             fill=gene_of_interest,
+                             forward=direction)) +
+  geom_gene_arrow() +
+  scale_fill_manual(values = mycols[2],guide=F)+
+  scale_x_continuous(labels = scales::comma, limits = xlim) +
+  theme_bw() +
+  labs(y="",
+       title=paste0(CURRENT_GENE$gene)) 
+```
+
+## Facet2: SNP Position and weight
+```{r}
+pf2 = ggplot(all_cohorts, aes(x=pos_hg38,
+                     y=SNPweight,
+                     color=ancestry)) +
+  geom_point(size=rel(2))+
+  labs(x="", y="Variant weight")+
+  scale_x_continuous(labels = scales::comma, limits = xlim) +
+  theme_bw() +
+  scale_color_manual(values = rev(mycols), guide=F) +
+  labs(y="Variant Weight") 
+```
+
+
+## Facet 3: BCAC GWAS 
+```{r}
+pf3 = ggplot(bcac_current.lift,
+             aes(x=pos_hg38,y=neg_log_pvalue)) +
+  geom_point(color=mycols[1])+
+  theme_bw() +
+  labs(x=paste0("Chromosomal Position (hg38) on ",bcac_current.lift$chr[1]), y="-log10(P)") +
+  scale_x_continuous(labels = scales::comma, limits = xlim) +
+  geom_hline(aes(yintercept = monster_current$neg_log_meta_all_raw),
+             color=mycols[2]) +
+  geom_hline(aes(yintercept = monster_current$neg_log_meta_euro_raw),
+                 linetype="dashed",
+                 color=mycols[2]) 
+```
+
+
+## Combine Facets
+```{r}
+out = cowplot::plot_grid(pf1, pf2, pf3, 
+                         align = "v", nrow = 3,
+                         rel_heights = c(1,2,2),
+                         axis = c("l","r"),
+                         labels = c("A","B","C"),
+                         label_size = 12)
+```
+
+```{r}
+out
+```
+
+# SAVE
+```{r}
+pdf(file = paste0(OUTFOLDER, SCRIPT,".supp_fig.overview_genetic_region.",
+                   CURRENT_GENE$gene,".",DATE,".pdf"), useDingbats = T)
+out
+dev.off()
+
+```
+
