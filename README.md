@@ -16,7 +16,7 @@ samples of European and diverse ancestry collected by the [Breast Cancer Associa
 
 ## Software
 ###  modified MONSTER binaries
-- original publication DOI: [10.1002/gepi.21775]([[10.1002/gepi.21775]](https://doi.org/10.1002/gepi.21775))   
+- original publication DOI: [10.1002/gepi.21775](https://doi.org/10.1002/gepi.21775)
 - original code: hosted at university of chicago    
 - original documentation: [MONSTER_v1.3_doc.pdf](https://www.stat.uchicago.edu/~mcpeek/software/MONSTER/MONSTER_v1.3_doc.pdf)   
 - github repository for adopted binaries: [https://github.com/stef-mueller/MONSTER](https://github.com/stef-mueller/MONSTER)   
