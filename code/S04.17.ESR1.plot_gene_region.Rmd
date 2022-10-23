@@ -92,11 +92,11 @@ sessionInfo()
 
 ## Set Global Varibales
 ```{r}
-# test whether on docker of local Ubuntu laptop
+# test whether on Dropbox of local Ubuntu laptop
 if (!grepl("Ubuntu",system("uname -v", intern=T))){
   DIR="/home/rstudio/WORK/UCL/UGI/BCAC_publication"
 } else {
-  DIR="/home/stef/WORK/UCL/UGI/projects/breast_cancer/publication"
+  DIR="/home/stef/Dropbox/WORK/UCL/UGI/projects/breast_cancer/publication"
 }
 
 
@@ -407,13 +407,19 @@ monster_current = monster %>%
 ## general variables
 ```{r}
 xlim=c(min(all_cohorts$pos_hg38, gene_model$start_position, na.rm = T),max(all_cohorts$pos_hg38, gene_model$end_position, na.rm = T))
+# override xlim fir ESR1 to make plot easier to understand, as no variants outside of
+# this manual window have been included in ESR1 gene aggregation model
+xlim = c(151600000, 152170000)
 
 ```
 
 
 ## Facet1: Gene Track
 ```{r}
-pf1 =  ggplot(gene_model,aes(xmin = start_position, xmax = end_position,
+pf1 =  gene_model %>%
+  # remove SYNE1 gene from plot as region is no longer included
+  filter(external_gene_name == "ESR1") %>% 
+  ggplot(aes(xmin = start_position, xmax = end_position,
                              y = external_gene_name, 
                              fill=gene_of_interest,
                              forward=direction)) +
@@ -466,7 +472,7 @@ out = cowplot::plot_grid(pf1, pf2, pf3,
 ```
 
 ```{r}
-out
+print(out)
 ```
 
 # SAVE
