@@ -406,14 +406,19 @@ monster_current = monster %>%
 ## general variables
 ```{r}
 xlim=c(min(all_cohorts$pos_hg38, gene_model$start_position, na.rm = T),max(all_cohorts$pos_hg38, gene_model$end_position, na.rm = T))
-
+# override xlim fir MIER3 to make plot easier to understand, as no variants outside of
+# this manual window have been included in MIER3 gene aggregation model
+xlim = c(56919000, 56971675)
 ```
 
 
 ## Facet1: Gene Track
 ```{r}
-pf1 = ggplot(gene_model, aes(xmin = start_position, xmax = end_position,
-                             y = external_gene_name, 
+pf1 =  gene_model %>%
+  # remove SETD9 gene from plot as region is no longer included
+  filter(external_gene_name == "MIER3") %>% 
+  ggplot(aes(xmin = start_position, xmax = end_position,
+             y =external_gene_name, 
                              fill=gene_of_interest,
                              forward=direction)) +
   geom_gene_arrow() +
@@ -465,7 +470,7 @@ out = cowplot::plot_grid(pf1, pf2, pf3,
 ```
 
 ```{r}
-out
+print(out)
 ```
 
 # SAVE
@@ -474,6 +479,5 @@ pdf(file = paste0(OUTFOLDER, SCRIPT,".supp_fig.overview_genetic_region.",
                    CURRENT_GENE$gene,".",DATE,".pdf"), useDingbats = T)
 out
 dev.off()
-
 ```
 

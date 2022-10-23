@@ -305,7 +305,7 @@ monster = read.csv(paste0(OUTFOLDER, "S01.MONSTER_Meta_analysis.2021-02-10.csv")
 ```
 
 
-# Create individual gene data: MAP3K1
+# Create individual gene data: TNNT3
 ## Load MONSTER SNPlist
 ### Set Gene
 ```{r}
@@ -406,14 +406,19 @@ monster_current = monster %>%
 ## general variables
 ```{r}
 xlim=c(min(all_cohorts$pos_hg38, gene_model$start_position, na.rm = T),max(all_cohorts$pos_hg38, gene_model$end_position, na.rm = T))
+# override xlim fir TNNT3 to make plot easier to understand, as no variants outside of
+# this manual window have been included in TNNT3 gene aggregation model
+xlim = c(1850904, 1955904)
 
 ```
 
 
 ## Facet1: Gene Track
 ```{r}
-pf1 = ggplot(gene_model, aes(xmin = start_position, xmax = end_position,
-                             y = external_gene_name, 
+pf1 =  gene_model %>%
+  # remove MRPL23 gene from plot as region is no longer included
+  filter(external_gene_name != "MRPL23") %>% 
+  ggplot(aes(xmin = start_position, xmax = end_position,                             y = external_gene_name, 
                              fill=gene_of_interest,
                              forward=direction)) +
   geom_gene_arrow() +
@@ -465,7 +470,7 @@ out = cowplot::plot_grid(pf1, pf2, pf3,
 ```
 
 ```{r}
-out
+print(out)
 ```
 
 # SAVE
