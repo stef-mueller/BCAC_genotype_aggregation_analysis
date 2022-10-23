@@ -424,7 +424,7 @@ pf1 =  gene_model %>%
                              fill=gene_of_interest,
                              forward=direction)) +
   geom_gene_arrow() +
-  scale_fill_manual(values = mycols,guide=F)+
+  scale_fill_manual(values = rev(mycols),guide=F)+
   scale_x_continuous(labels = scales::comma, limits = xlim) +
   theme_bw() +
   labs(y="",
